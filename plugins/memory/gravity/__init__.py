@@ -13,13 +13,15 @@ logger = logging.getLogger(__name__)
 # Constants for semantic memory noise filtering
 NOISE_PREFIXES = ("/", "!", ".")
 NOISE_KEYWORDS = [
-    "Cambiado modelo",
-    "Memoria actualizada",
-    "Skin cambiada",
-    "Sesión reanudada",
-    "Limpiando terminal",
-    "Cargando..."
+    "Cambiado modelo", "Memoria actualizada", "Skin cambiada",
+    "Sesión reanudada", "Limpiando terminal", "Cargando...",
+    "Hola", "Buenas", "Gracias", "Ok", "Entendido"
 ]
+INTENT_KEYWORDS = [
+    "proyecto", "stack", "prefiero", "mi nombre", "estoy trabajando",
+    "configura", "guarda", "recuerda", "contexto", "error"
+]
+MIN_CONTENT_LENGTH = 15
 
 # Deferred imports for optional dependencies
 supabase_client = None
@@ -168,16 +170,22 @@ class GravityMemoryProvider(MemoryProvider):
                     {"session_id": self._session_id, "role": "assistant", "content": assistant_content}
                 ]).execute()
 
-                # 2. Extract Facts (Autonomous)
-                self._bg_extract_facts(user_content, assistant_content)
+                # 2. Targeted Fact Extraction: Only if content is significant
+                is_command = user_content.strip().startswith(NOISE_PREFIXES)
+                is_short = len(user_content.strip()) < MIN_CONTENT_LENGTH
+                has_intent = any(kw.lower() in user_content.lower() for kw in INTENT_KEYWORDS)
+                is_noisy = any(kw.lower() in user_content.lower() for kw in NOISE_KEYWORDS)
+
+                if not is_command and not is_short and (has_intent or not is_noisy):
+                    self._bg_extract_facts(user_content, assistant_content)
+                else:
+                    logger.debug(f"Skipping fact extraction for short/noisy turn: {user_content[:30]}...")
 
                 # 3. Embed and Save turn to Pinecone (as Conversation history)
-                # OPTIMIZATION: Skip noisy/administrative turns for semantic memory
-                is_command = user_content.strip().startswith(NOISE_PREFIXES)
+                # Skip administrative replies for semantic conversation memory
                 is_admin_reply = any(kw in assistant_content for kw in NOISE_KEYWORDS)
                 
                 if is_command or is_admin_reply:
-                    logger.debug(f"Skipping noisy turn for Pinecone: {user_content[:50]}...")
                     return
 
                 turn_text = f"User: {user_content}\nAssistant: {assistant_content}"
@@ -234,100 +242,62 @@ class GravityMemoryProvider(MemoryProvider):
         threading.Thread(target=_bg_mirror, daemon=True).start()
 
     def _bg_extract_facts(self, user_content: str, assistant_content: str) -> None:
-        """Call auxiliary model to extract facts from turn and save them."""
+        """Consolidated fact extraction and reconciliation using local context."""
         try:
+            # 1. Get similar existing facts for reconciliation context
+            context_raw = self.prefetch(user_content)
+            
             client, model = get_text_auxiliary_client("fact_extractor")
             if not client or not model:
                 return
 
             prompt = (
-                "Extract any NEW, PERMANENT facts from this conversation turn and categorize them.\n"
+                "You are a Memory Manager. Extract NEW, PERMANENT facts from the turn and reconcile them with existing context.\n"
                 "Categories: user_preference, project_context, technical_stack, personal_info, workflow_pattern.\n\n"
-                f"User: {user_content}\n"
-                f"Assistant: {assistant_content}\n\n"
-                "Return a JSON list of objects: [{\"fact\": \"...\", \"category\": \"...\"}]. If nothing, return []."
+                f"### EXISTING CONTEXT:\n{context_raw if context_raw else 'No previous facts found.'}\n\n"
+                f"### CURRENT TURN:\nUser: {user_content}\nAssistant: {assistant_content}\n\n"
+                "### INSTRUCTIONS:\n"
+                "1. Identify NEW facts that are not already in the context.\n"
+                "2. If a new fact updates or contradicts an existing one, mark it as 'update'.\n"
+                "3. If it's truly new, mark it as 'add'.\n"
+                "4. Return a JSON list: [{\"fact\": \"...\", \"category\": \"...\", \"action\": \"add|update\", \"target_id\": \"id_if_update\"}].\n"
+                "Return [] if no valuable permanent facts are found."
             )
 
             resp = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
-                max_tokens=500
+                max_tokens=600
             )
             
             raw_content = resp.choices[0].message.content
-            # Simple JSON extraction
             try:
                 start = raw_content.find('[')
                 end = raw_content.rfind(']') + 1
-                if start != -1 and end != -1:
-                    extracted = json.loads(raw_content[start:end])
-                else:
-                    extracted = []
+                extracted = json.loads(raw_content[start:end]) if (start != -1 and end != -1) else []
             except:
                 extracted = []
 
-            added_facts = []
             for item in extracted:
-                fact = item.get("fact", "")
+                fact = item.get("fact", "").strip()
                 category = item.get("category", "general_fact")
-                if fact.strip():
-                    # Save with metadata
-                    self.on_memory_write("add", "user", fact.strip(), metadata={"sub_category": category})
-                    added_facts.append(fact.strip())
+                action = item.get("action", "add")
+                target_id = item.get("target_id")
 
-            # Trigger reconciliation for the new facts
-            if added_facts:
-                self._reconcile_memories(added_facts)
-
-        except Exception as e:
-            logger.error(f"Error in autonomous fact extraction: {e}")
-
-    def _reconcile_memories(self, new_facts: List[str]) -> None:
-        """Identify and merge redundant or contradictory facts."""
-        if not new_facts or not self._initialized:
-            return
-
-        try:
-            client, model = get_text_auxiliary_client("fact_reconciler")
-            if not client or not model:
-                return
-
-            for fact in new_facts:
-                # 1. Search for similar facts
-                similar = self.prefetch(fact)
-                if not similar:
-                    continue
-
-                # 2. Ask LLM to judge redundancy or contradiction
-                prompt = (
-                    "Compare these two facts for a user profile. Are they redundant, contradictory, or compatible?\n\n"
-                    f"New Fact: {fact}\n"
-                    f"Existing Fact: {similar[0]}\n\n"
-                    "If they are REDUNDANT or CONTRADICTORY, return a JSON object:\n"
-                    "{\"status\": \"redundant|contradictory\", \"merged_fact\": \"...\", \"action\": \"replace|delete\"}\n"
-                    "If they are COMPATIBLE, return {\"status\": \"compatible\"}."
-                )
-
-                resp = client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0,
-                    max_tokens=500
-                )
-
-                try:
-                    result = json.loads(resp.choices[0].message.content)
-                    if result.get("status") in ["redundant", "contradictory"]:
-                        # For now, let's just log it. In a real scenario, we'd delete the old and add the new/merged.
-                        logger.info(f"Memory reconciliation: {result['status']} found between '{fact}' and '{similar[0]}'")
-                        # Implementation detail: we'd need the ID of 'similar[0]' to replace it.
-                except:
-                    continue
+                if fact:
+                    # Save/Update using the standard tool path
+                    self.on_memory_write(
+                        "add" if action == "add" else "replace", 
+                        "user", 
+                        fact, 
+                        metadata={"sub_category": category},
+                        target_id=target_id
+                    )
+                    logger.info(f"Memory {action}: {fact[:50]}...")
 
         except Exception as e:
-            logger.error(f"Error in memory reconciliation: {e}")
-
+            logger.error(f"Error in consolidated fact extraction: {e}")
     def handle_manage_memory(self, action: str, target_id: Optional[str] = None, content: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> str:
         """Actual implementation of the manage_memory tool."""
         if not self._initialized:

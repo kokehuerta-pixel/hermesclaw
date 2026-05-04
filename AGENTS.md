@@ -75,6 +75,22 @@ run_agent.py, cli.py, batch_runner.py, environments/
 
 ---
 
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs live as markdown files under `.scratch/`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Standard vocabulary (`needs-triage`, `ready-for-agent`, etc.). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout. See `docs/agents/domain.md`.
+
+---
+
 ## AIAgent Class (run_agent.py)
 
 The real `AIAgent.__init__` takes ~60 parameters (credentials, routing, callbacks,
