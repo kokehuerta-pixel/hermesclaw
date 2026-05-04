@@ -4,9 +4,11 @@ import json
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime
+from pathlib import Path
 
 from agent.memory_provider import MemoryProvider
 from agent.auxiliary_client import get_text_auxiliary_client
+from tools.registry import tool_error
 
 logger = logging.getLogger(__name__)
 
@@ -32,19 +34,86 @@ def _import_deps():
     try:
         from supabase import create_client as supabase_create
         supabase_client = supabase_create
-    except ImportError:
-        logger.debug("supabase package not installed")
+    except Exception as e:
+        logger.error(f"Failed to import Supabase: {e}")
+        supabase_client = None
         
     try:
         from pinecone import Pinecone
         pinecone_client = Pinecone
-    except ImportError:
-        logger.debug("pinecone-client package not installed")
+    except Exception as e:
+        logger.error(f"Failed to import Pinecone: {e}")
+        pinecone_client = None
+
+# ---------------------------------------------------------------------------
+# Config Loader
+# ---------------------------------------------------------------------------
+
+def _load_config() -> dict:
+    """Load config from env vars, with $HERMES_HOME/gravity.json overrides."""
+    from hermes_constants import get_hermes_home
+
+    config = {
+        "supabase_url": os.environ.get("SUPABASE_URL", ""),
+        "supabase_key": os.environ.get("SUPABASE_SERVICE_ROLE_KEY", ""),
+        "pinecone_api_key": os.environ.get("PINECONE_API_KEY", ""),
+        "pinecone_index": os.environ.get("PINECONE_INDEX_NAME", ""),
+        "user_id": "default",
+    }
+
+    config_path = get_hermes_home() / "gravity.json"
+    if config_path.exists():
+        try:
+            file_cfg = json.loads(config_path.read_text(encoding="utf-8"))
+            config.update({k: v for k, v in file_cfg.items()
+                           if v is not None and v != ""})
+        except Exception:
+            pass
+
+    return config
+
+# ---------------------------------------------------------------------------
+# Tool Schemas
+# ---------------------------------------------------------------------------
+
+MANAGE_MEMORY_SCHEMA = {
+    "name": "gravity_manage_memory",
+    "description": (
+        "Manage the long-term autonomous memory (Gravity). "
+        "Use this to add, search, update, or delete permanent facts about the user or project."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["add", "search", "update", "delete"],
+                "description": "The action to perform."
+            },
+            "target_id": {
+                "type": "string",
+                "description": "The ID of the memory to update or delete (returned from search)."
+            },
+            "content": {
+                "type": "string",
+                "description": "The memory text to add, update, or search for."
+            },
+            "category": {
+                "type": "string",
+                "enum": ["user_preference", "project_context", "technical_stack", "personal_info", "workflow_pattern"],
+                "description": "The category of the memory (optional, defaults to 'general')."
+            }
+        },
+        "required": ["action"]
+    },
+}
+
+# ---------------------------------------------------------------------------
+# MemoryProvider implementation
+# ---------------------------------------------------------------------------
 
 class GravityMemoryProvider(MemoryProvider):
     """Memory provider using Supabase (relational) and Pinecone (semantic)."""
-
-    _INSTANCE: Optional['GravityMemoryProvider'] = None
 
     def __init__(self):
         self._supabase = None
@@ -53,7 +122,6 @@ class GravityMemoryProvider(MemoryProvider):
         self._session_id = None
         self._user_id = "default"
         self._initialized = False
-        GravityMemoryProvider._INSTANCE = self
         _import_deps()
 
     @property
@@ -62,36 +130,46 @@ class GravityMemoryProvider(MemoryProvider):
 
     def is_available(self) -> bool:
         """Check if credentials and dependencies are present."""
+        cfg = _load_config()
         has_deps = all([supabase_client, pinecone_client])
         has_creds = all([
-            os.getenv("SUPABASE_URL"),
-            os.getenv("SUPABASE_SERVICE_ROLE_KEY"),
-            os.getenv("PINECONE_API_KEY"),
-            os.getenv("PINECONE_INDEX_NAME")
+            cfg.get("supabase_url"),
+            cfg.get("supabase_key"),
+            cfg.get("pinecone_api_key"),
+            cfg.get("pinecone_index")
         ])
         return has_deps and has_creds
 
     def initialize(self, session_id: str, **kwargs) -> None:
+        cfg = _load_config()
         if not self.is_available():
-            logger.warning("Gravity provider initialized but missing dependencies or credentials.")
+            logger.warning("Gravity provider missing dependencies or credentials.")
             return
 
         self._session_id = session_id
-        self._user_id = kwargs.get("user_id", "default")
+        self._user_id = kwargs.get("user_id") or cfg.get("user_id", "default")
         
         # Initialize Supabase
         self._supabase = supabase_client(
-            os.getenv("SUPABASE_URL"),
-            os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+            cfg["supabase_url"],
+            cfg["supabase_key"]
         )
 
         # Initialize Pinecone
-        pc = pinecone_client(api_key=os.getenv("PINECONE_API_KEY"))
-        # Targeted index should be configured for Integrated Inference
-        self._pc_index = pc.Index(os.getenv("PINECONE_INDEX_NAME"))
+        pc = pinecone_client(api_key=cfg["pinecone_api_key"])
+        self._pc_index = pc.Index(cfg["pinecone_index"])
 
         self._initialized = True
         logger.info(f"Gravity memory provider initialized for session {session_id}")
+
+    def system_prompt_block(self) -> str:
+        if not self._initialized:
+            return ""
+        return (
+            "# Gravity Memory\n"
+            f"Active. User: {self._user_id}.\n"
+            "Use gravity_manage_memory to add, search, update, or delete permanent facts."
+        )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         if not self._initialized or not query:
@@ -101,46 +179,48 @@ class GravityMemoryProvider(MemoryProvider):
             # Search Pinecone with Integrated Inference
             search_results = self._pc_index.search(
                 namespace="gravity",
-                query={
-                    "inputs": {"text": query},
-                    "top_k": 8
-                },
+                inputs={"text": query},
+                top_k=8,
                 fields=["text", "category", "sub_category"]
             )
 
-            hits = getattr(search_results.get("result", {}), "hits", [])
+            # Extract hits safely from SearchRecordsResponse object
+            hits = []
+            if hasattr(search_results, "result") and hasattr(search_results.result, "hits"):
+                hits = search_results.result.hits
+            elif isinstance(search_results, dict):
+                hits = search_results.get("result", {}).get("hits", [])
+            
             if not hits:
-                # Try fallback to legacy namespace (this might fail if model mismatch, but safe to try)
-                search_results = self._pc_index.search(
-                    namespace="conversations",
-                    query={
-                        "inputs": {"text": query},
-                        "top_k": 5
-                    },
-                    fields=["text", "category"]
-                )
-                hits = getattr(search_results.get("result", {}), "hits", [])
-                if not hits:
-                    return ""
+                return ""
 
-            # 3. Format context
+            # Format context
             facts = []
             convs = []
             
             for hit in hits:
-                fields = hit.get("fields", {})
-                text = fields.get("text", "")
-                category = fields.get("category", "conversación")
-                score = hit.get("score", 0)
+                # Handle both object attributes (SDK v8+) and dictionary keys (fallback)
+                if hasattr(hit, "fields"):
+                    fields = hit.fields
+                    score = hit.score
+                elif isinstance(hit, dict):
+                    fields = hit.get("fields", {})
+                    score = hit.get("score", 0)
+                else:
+                    continue
                 
-                if text:
-                    sub_cat = fields.get("sub_category", "general")
-                    label = f"HECHO:{sub_cat}" if category == "fact" else "CONV"
-                    formatted = f"[{label} - {score:.2f}] {text}"
-                    if category == "fact":
-                        facts.append(formatted)
-                    else:
-                        convs.append(formatted)
+                text = fields.get("text", "")
+                category = fields.get("category", "")
+                if not text:
+                    continue
+
+                sub_cat = fields.get("sub_category", "general")
+                label = f"HECHO:{sub_cat}" if category == "fact" else "CONV"
+                formatted = f"[{label} - {score:.2f}] {text}"
+                if category == "fact":
+                    facts.append(formatted)
+                else:
+                    convs.append(formatted)
 
             output_parts = []
             if facts:
@@ -170,7 +250,7 @@ class GravityMemoryProvider(MemoryProvider):
                     {"session_id": self._session_id, "role": "assistant", "content": assistant_content}
                 ]).execute()
 
-                # 2. Targeted Fact Extraction: Only if content is significant
+                # 2. Targeted Fact Extraction
                 is_command = user_content.strip().startswith(NOISE_PREFIXES)
                 is_short = len(user_content.strip()) < MIN_CONTENT_LENGTH
                 has_intent = any(kw.lower() in user_content.lower() for kw in INTENT_KEYWORDS)
@@ -178,18 +258,13 @@ class GravityMemoryProvider(MemoryProvider):
 
                 if not is_command and not is_short and (has_intent or not is_noisy):
                     self._bg_extract_facts(user_content, assistant_content)
-                else:
-                    logger.debug(f"Skipping fact extraction for short/noisy turn: {user_content[:30]}...")
 
-                # 3. Embed and Save turn to Pinecone (as Conversation history)
-                # Skip administrative replies for semantic conversation memory
+                # 3. Save turn to Pinecone (as Conversation history)
                 is_admin_reply = any(kw in assistant_content for kw in NOISE_KEYWORDS)
-                
                 if is_command or is_admin_reply:
                     return
 
                 turn_text = f"User: {user_content}\nAssistant: {assistant_content}"
-                
                 self._pc_index.upsert_records(
                     namespace="gravity",
                     records=[{
@@ -213,8 +288,8 @@ class GravityMemoryProvider(MemoryProvider):
         def _bg_mirror():
             try:
                 if action in ['add', 'replace'] and target == 'user':
-                    # 1. Save to Supabase
                     fact_id = target_id if target_id else ("fact_" + str(hash(content))[:8])
+                    # 1. Save to Supabase
                     self._supabase.table("core_memory").upsert({
                         "user_id": self._user_id,
                         "key": fact_id,
@@ -222,7 +297,7 @@ class GravityMemoryProvider(MemoryProvider):
                         "updated_at": datetime.now().isoformat()
                     }, on_conflict="user_id,key").execute()
 
-                    # 2. Mirror to Pinecone for semantic retrieval
+                    # 2. Mirror to Pinecone
                     self._pc_index.upsert_records(
                         namespace="gravity",
                         records=[{
@@ -234,19 +309,15 @@ class GravityMemoryProvider(MemoryProvider):
                             "timestamp": datetime.now().isoformat()
                         }]
                     )
-                    logger.info(f"Fact mirrored to Pinecone: {fact_id}")
-
             except Exception as e:
-                logger.error(f"Error mirroring memory write to Supabase/Pinecone: {e}")
+                logger.error(f"Error mirroring memory write: {e}")
 
         threading.Thread(target=_bg_mirror, daemon=True).start()
 
     def _bg_extract_facts(self, user_content: str, assistant_content: str) -> None:
-        """Consolidated fact extraction and reconciliation using local context."""
+        """Consolidated fact extraction and reconciliation."""
         try:
-            # 1. Get similar existing facts for reconciliation context
             context_raw = self.prefetch(user_content)
-            
             client, model = get_text_auxiliary_client("fact_extractor")
             if not client or not model:
                 return
@@ -286,7 +357,6 @@ class GravityMemoryProvider(MemoryProvider):
                 target_id = item.get("target_id")
 
                 if fact:
-                    # Save/Update using the standard tool path
                     self.on_memory_write(
                         "add" if action == "add" else "replace", 
                         "user", 
@@ -294,57 +364,62 @@ class GravityMemoryProvider(MemoryProvider):
                         metadata={"sub_category": category},
                         target_id=target_id
                     )
-                    logger.info(f"Memory {action}: {fact[:50]}...")
-
         except Exception as e:
-            logger.error(f"Error in consolidated fact extraction: {e}")
-    def handle_manage_memory(self, action: str, target_id: Optional[str] = None, content: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> str:
-        """Actual implementation of the manage_memory tool."""
+            logger.error(f"Error in fact extraction: {e}")
+
+    def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
         if not self._initialized:
-            return json.dumps({"error": "Memory provider not initialized."})
+            return tool_error("Gravity memory provider not initialized.")
 
-        try:
-            if action == "add":
-                self.on_memory_write("add", "user", content, metadata=metadata)
-                return json.dumps({"success": True, "message": "Fact added to long-term memory."})
+        if tool_name == "gravity_manage_memory":
+            action = args.get("action")
+            target_id = args.get("target_id")
+            content = args.get("content")
+            category = args.get("category")
             
-            elif action == "search":
-                # Use prefetch logic for search
-                results = self.prefetch(content)
-                return json.dumps({"success": True, "results": results})
+            try:
+                if action == "add":
+                    self.on_memory_write("add", "user", content, metadata={"sub_category": category} if category else None)
+                    return json.dumps({"success": True, "message": "Fact added to long-term memory."})
+                
+                elif action == "search":
+                    results = self.prefetch(content)
+                    return json.dumps({"success": True, "results": results})
 
-            elif action == "delete":
-                if not target_id:
-                    return json.dumps({"error": "target_id required for delete."})
-                # Delete from Supabase
-                self._supabase.table("core_memory").delete().eq("key", target_id).execute()
-                # Delete from Pinecone
-                self._pc_index.delete(ids=[f"fact-{self._user_id}-{target_id}"], namespace="gravity")
-                return json.dumps({"success": True, "message": f"Memory {target_id} deleted."})
+                elif action == "delete":
+                    if not target_id:
+                        return tool_error("target_id required for delete.")
+                    self._supabase.table("core_memory").delete().eq("key", target_id).execute()
+                    self._pc_index.delete(ids=[f"fact-{self._user_id}-{target_id}"], namespace="gravity")
+                    return json.dumps({"success": True, "message": f"Memory {target_id} deleted."})
 
-            elif action == "update":
-                if not target_id or not content:
-                    return json.dumps({"error": "target_id and content required for update."})
-                self.on_memory_write("replace", "user", content, metadata=metadata, target_id=target_id)
-                return json.dumps({"success": True, "message": f"Memory {target_id} updated."})
+                elif action == "update":
+                    if not target_id or not content:
+                        return tool_error("target_id and content required for update.")
+                    self.on_memory_write("replace", "user", content, metadata={"sub_category": category} if category else None, target_id=target_id)
+                    return json.dumps({"success": True, "message": f"Memory {target_id} updated."})
 
-            return json.dumps({"error": f"Unknown action: {action}"})
+                return tool_error(f"Unknown action: {action}")
+            except Exception as e:
+                return tool_error(str(e))
 
-        except Exception as e:
-            logger.error(f"Error in handle_manage_memory: {e}")
-            return json.dumps({"error": str(e)})
+        return tool_error(f"Unknown tool: {tool_name}")
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [] # We'll register via tools.py instead
+        return [MANAGE_MEMORY_SCHEMA]
 
     def get_config_schema(self) -> List[Dict[str, Any]]:
         return [
-            {"key": "SUPABASE_URL", "description": "Supabase Project URL", "secret": True, "required": True},
-            {"key": "SUPABASE_SERVICE_ROLE_KEY", "description": "Supabase Service Role Key", "secret": True, "required": True},
-            {"key": "PINECONE_API_KEY", "description": "Pinecone API Key", "secret": True, "required": True},
-            {"key": "PINECONE_INDEX_NAME", "description": "Pinecone Index Name (Integrated)", "secret": True, "required": True}
+            {"key": "supabase_url", "description": "Supabase Project URL", "secret": False, "required": True, "env_var": "SUPABASE_URL"},
+            {"key": "supabase_key", "description": "Supabase Service Role Key", "secret": True, "required": True, "env_var": "SUPABASE_SERVICE_ROLE_KEY"},
+            {"key": "pinecone_api_key", "description": "Pinecone API Key", "secret": True, "required": True, "env_var": "PINECONE_API_KEY"},
+            {"key": "pinecone_index", "description": "Pinecone Index Name", "secret": False, "required": True, "env_var": "PINECONE_INDEX_NAME"},
+            {"key": "user_id", "description": "User identifier for memory scoping", "default": "default"}
         ]
 
+    def shutdown(self) -> None:
+        self._supabase = None
+        self._pc_index = None
+
 def register(ctx):
-    provider = GravityMemoryProvider()
-    ctx.register_memory_provider(provider)
+    ctx.register_memory_provider(GravityMemoryProvider())
