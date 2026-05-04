@@ -1,0 +1,4 @@
+name: gravity
+description: "Long-term memory using Supabase (relational) and Pinecone (semantic) with Gemini embeddings."
+author: "Antigravity"
+version: "1.0.0"

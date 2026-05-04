@@ -163,6 +163,7 @@ PROVIDER_TO_MODELS_DEV: Dict[str, str] = {
     "huggingface": "huggingface",
     "gemini": "google",
     "google": "google",
+    "google-gemini-cli": "google",
     "xai": "xai",
     "xiaomi": "xiaomi",
     "nvidia": "nvidia",
@@ -447,9 +448,7 @@ _NOISE_PATTERNS: re.Pattern = re.compile(
 _GOOGLE_HIDDEN_MODELS = frozenset({
     # Low-TPM Gemma models that trip Google input-token quota walls under
     # agent-style traffic despite advertising large context windows.
-    "gemma-4-31b-it",
-    "gemma-4-26b-it",
-    "gemma-4-26b-a4b-it",
+    # (Surfaced per user request: gemma-4-31b-it, gemma-4-26b-it, gemma-4-26b-a4b-it)
     "gemma-3-1b",
     "gemma-3-1b-it",
     "gemma-3-2b",

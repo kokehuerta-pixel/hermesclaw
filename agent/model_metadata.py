@@ -163,10 +163,17 @@ DEFAULT_CONTEXT_LENGTHS = {
     "gpt-4": 128000,
     # Google
     "gemini": 1048576,
+    "gemini-3.1-flash-lite": 1048576,
+    "gemini-3-flash": 1048576,
+    "gemini-3.1-flash-lite-preview": 1048576,
+    "gemini-3-flash-preview": 1048576,
     # Gemma (open models served via AI Studio)
     "gemma-4": 256000,  # Gemma 4 family
     "gemma4": 256000,  # Ollama-style naming (e.g. gemma4:31b-cloud)
     "gemma-4-31b": 256000,
+    "gemma-4-26b": 256000,
+    "gemma-4-31b-it": 256000,
+    "gemma-4-26b-a4b-it": 256000,
     "gemma-3": 131072,
     "gemma": 8192,  # fallback for older gemma models
     # DeepSeek — V4 family ships with a 1M context window. The legacy
