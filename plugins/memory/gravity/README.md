@@ -1,38 +1,49 @@
 # Gravity Memory Provider
 
-High-performance long-term memory for Hermes using Supabase and Pinecone.
+Sistema de memoria de largo plazo de alto rendimiento para Hermes, utilizando Supabase (relacional) y Pinecone (semántica). 
 
-## Setup
+Gravity está diseñado para ser un plugin nativo de Hermes, integrándose directamente en el ciclo de vida del agente sin necesidad de configuraciones externas complejas.
 
-1. **Install Dependencies**:
+## Características
+
+- **Almacenamiento Dual**: Mensajes y hechos en Supabase, búsqueda vectorial en Pinecone.
+- **Extracción Autónoma**: Utiliza modelos auxiliares (Gemini) para extraer hechos de forma asíncrona.
+- **Filtrado de Ruido**: Ignora comandos, saludos y respuestas cortas para mantener la memoria limpia.
+- **Inferencia Integrada**: Optimizado para usar la inferencia integrada de Pinecone.
+
+## Requisitos
+
+1. **Instalar Dependencias**:
    ```bash
-   pip install supabase pinecone-client google-generativeai
+   pip install supabase pinecone google-generativeai
    ```
 
-2. **Supabase Setup**:
-   - Create a new project on [Supabase](https://supabase.com).
-   - Go to the **SQL Editor** and run the contents of `schema.sql`.
-   - Copy your **Project URL** and **Service Role Key**.
+2. **Configuración de Supabase**:
+   - Crea un proyecto en [Supabase](https://supabase.com).
+   - En el **SQL Editor**, ejecuta el contenido de `schema.sql`.
+   - Copia tu **Project URL** y **Service Role Key**.
 
-3. **Pinecone Setup**:
-   - Create an index on [Pinecone](https://pinecone.io).
-   - Dimensions: **768** (for `text-embedding-004`).
-   - Metric: **Cosine**.
-   - Copy your **API Key** and **Index Name**.
+3. **Configuración de Pinecone**:
+   - Crea un índice en [Pinecone](https://pinecone.io).
+   - Dimensiones: **768** (si usas `multilingual-e5-large` o similar con Integrated Inference).
+   - Métrica: **Cosine**.
+   - Copia tu **API Key** e **Index Name**.
 
-4. **Environment Variables**:
-   Add the following to your `.env` file:
+4. **Variables de Entorno**:
+   Añade lo siguiente a tu archivo `.env`:
    ```env
-   SUPABASE_URL=your_supabase_url
-   SUPABASE_SERVICE_ROLE_KEY=your_supabase_key
-   PINECONE_API_KEY=your_pinecone_key
-   PINECONE_INDEX_NAME=your_index_name
-   GEMINI_API_KEY=your_gemini_key
+   SUPABASE_URL=tu_url_de_supabase
+   SUPABASE_SERVICE_ROLE_KEY=tu_clave_de_servicio
+   PINECONE_API_KEY=tu_clave_de_pinecone
+   PINECONE_INDEX_NAME=tu_nombre_de_indice
    ```
 
-5. **Activate**:
-   Update `config.yaml`:
-   ```yaml
-   memory:
-     provider: gravity
-   ```
+## Activación
+
+Simplemente configura el proveedor en tu `config.yaml`:
+```yaml
+memory:
+  provider: gravity
+```
+
+Hermes detectará automáticamente el plugin y registrará la herramienta `gravity_manage_memory` para que el modelo pueda gestionar su propia memoria de forma explícita.

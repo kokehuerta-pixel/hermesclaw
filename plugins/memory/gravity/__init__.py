@@ -122,6 +122,9 @@ class GravityMemoryProvider(MemoryProvider):
         self._session_id = None
         self._user_id = "default"
         self._initialized = False
+        self._prefetch_result = ""
+        self._prefetch_lock = threading.Lock()
+        self._prefetch_thread = None
         _import_deps()
 
     @property
@@ -139,6 +142,18 @@ class GravityMemoryProvider(MemoryProvider):
             cfg.get("pinecone_index")
         ])
         return has_deps and has_creds
+
+    def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:
+        """Write config to $HERMES_HOME/gravity.json."""
+        config_path = Path(hermes_home) / "gravity.json"
+        existing = {}
+        if config_path.exists():
+            try:
+                existing = json.loads(config_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        existing.update(values)
+        config_path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
 
     def initialize(self, session_id: str, **kwargs) -> None:
         cfg = _load_config()
@@ -172,71 +187,84 @@ class GravityMemoryProvider(MemoryProvider):
         )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
+        """Return the pre-fetched semantic context."""
+        if self._prefetch_thread and self._prefetch_thread.is_alive():
+            self._prefetch_thread.join(timeout=3.0)
+        
+        with self._prefetch_lock:
+            result = self._prefetch_result
+            self._prefetch_result = ""
+        
+        return result
+
+    def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
+        """Queue a background semantic search for the next turn."""
         if not self._initialized or not query:
-            return ""
+            return
 
-        try:
-            # Search Pinecone with Integrated Inference
-            search_results = self._pc_index.search(
-                namespace="gravity",
-                inputs={"text": query},
-                top_k=8,
-                fields=["text", "category", "sub_category"]
-            )
+        def _run_search():
+            try:
+                # Search Pinecone with Integrated Inference
+                search_results = self._pc_index.search(
+                    namespace="gravity",
+                    inputs={"text": query},
+                    top_k=8,
+                    fields=["text", "category", "sub_category"]
+                )
 
-            # Extract hits safely from SearchRecordsResponse object
-            hits = []
-            if hasattr(search_results, "result") and hasattr(search_results.result, "hits"):
-                hits = search_results.result.hits
-            elif isinstance(search_results, dict):
-                hits = search_results.get("result", {}).get("hits", [])
-            
-            if not hits:
-                return ""
-
-            # Format context
-            facts = []
-            convs = []
-            
-            for hit in hits:
-                # Handle both object attributes (SDK v8+) and dictionary keys (fallback)
-                if hasattr(hit, "fields"):
-                    fields = hit.fields
-                    score = hit.score
-                elif isinstance(hit, dict):
-                    fields = hit.get("fields", {})
-                    score = hit.get("score", 0)
-                else:
-                    continue
+                # Extract hits safely
+                hits = []
+                if hasattr(search_results, "result") and hasattr(search_results.result, "hits"):
+                    hits = search_results.result.hits
+                elif isinstance(search_results, dict):
+                    hits = search_results.get("result", {}).get("hits", [])
                 
-                text = fields.get("text", "")
-                category = fields.get("category", "")
-                if not text:
-                    continue
+                if not hits:
+                    return
 
-                sub_cat = fields.get("sub_category", "general")
-                label = f"HECHO:{sub_cat}" if category == "fact" else "CONV"
-                formatted = f"[{label} - {score:.2f}] {text}"
-                if category == "fact":
-                    facts.append(formatted)
-                else:
-                    convs.append(formatted)
+                # Format context
+                facts = []
+                convs = []
+                
+                for hit in hits:
+                    if hasattr(hit, "fields"):
+                        fields = hit.fields
+                        score = hit.score
+                    elif isinstance(hit, dict):
+                        fields = hit.get("fields", {})
+                        score = hit.get("score", 0)
+                    else:
+                        continue
+                    
+                    text = fields.get("text", "")
+                    category = fields.get("category", "")
+                    if not text:
+                        continue
 
-            output_parts = []
-            if facts:
-                output_parts.append("**Hechos Recurridos:**\n" + "\n".join(facts))
-            if convs:
-                output_parts.append("**Conversaciones Previas:**\n" + "\n".join(convs))
+                    sub_cat = fields.get("sub_category", "general")
+                    label = f"HECHO:{sub_cat}" if category == "fact" else "CONV"
+                    formatted = f"[{label} - {score:.2f}] {text}"
+                    if category == "fact":
+                        facts.append(formatted)
+                    else:
+                        convs.append(formatted)
 
-            if not output_parts:
-                return ""
+                output_parts = []
+                if facts:
+                    output_parts.append("**Hechos Recurridos:**\n" + "\n".join(facts))
+                if convs:
+                    output_parts.append("**Conversaciones Previas:**\n" + "\n".join(convs))
 
-            formatted_context = "\n\n".join(output_parts)
-            return f"\n<gravity-context>\n{formatted_context}\n</gravity-context>\n"
+                if output_parts:
+                    formatted_context = "\n\n".join(output_parts)
+                    with self._prefetch_lock:
+                        self._prefetch_result = f"\n<gravity-context>\n{formatted_context}\n</gravity-context>\n"
 
-        except Exception as e:
-            logger.error(f"Error in gravity prefetch: {e}")
-            return ""
+            except Exception as e:
+                logger.error(f"Error in gravity background prefetch: {e}")
+
+        self._prefetch_thread = threading.Thread(target=_run_search, daemon=True, name="gravity-prefetch")
+        self._prefetch_thread.start()
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         if not self._initialized:
@@ -281,18 +309,22 @@ class GravityMemoryProvider(MemoryProvider):
 
         threading.Thread(target=_bg_sync, daemon=True).start()
 
-    def on_memory_write(self, action: str, target: str, content: str, metadata: Optional[Dict[str, Any]] = None, target_id: Optional[str] = None) -> None:
+    def on_memory_write(self, action: str, target: str, content: str, metadata: Optional[Dict[str, Any]] = None) -> None:
         if not self._initialized:
             return
 
         def _bg_mirror():
             try:
                 if action in ['add', 'replace'] and target == 'user':
-                    fact_id = target_id if target_id else ("fact_" + str(hash(content))[:8])
+                    # Extract target_id from metadata if available (standard pattern)
+                    target_id = metadata.get("target_id") if metadata else None
+                    if not target_id:
+                        # Fallback: hash the content if no ID provided
+                        target_id = ("fact_" + str(hash(content))[:8])
                     # 1. Save to Supabase
                     self._supabase.table("core_memory").upsert({
                         "user_id": self._user_id,
-                        "key": fact_id,
+                        "key": target_id,
                         "value": content,
                         "updated_at": datetime.now().isoformat()
                     }, on_conflict="user_id,key").execute()
@@ -301,7 +333,7 @@ class GravityMemoryProvider(MemoryProvider):
                     self._pc_index.upsert_records(
                         namespace="gravity",
                         records=[{
-                            "id": f"fact-{self._user_id}-{fact_id}",
+                            "id": f"fact-{self._user_id}-{target_id}",
                             "text": content,
                             "category": "fact",
                             "sub_category": metadata.get("sub_category", "general") if metadata else "general",
@@ -357,12 +389,16 @@ class GravityMemoryProvider(MemoryProvider):
                 target_id = item.get("target_id")
 
                 if fact:
+                    # Prepare metadata with category and target_id
+                    metadata = {"sub_category": category}
+                    if target_id:
+                        metadata["target_id"] = target_id
+                        
                     self.on_memory_write(
                         "add" if action == "add" else "replace", 
                         "user", 
                         fact, 
-                        metadata={"sub_category": category},
-                        target_id=target_id
+                        metadata=metadata
                     )
         except Exception as e:
             logger.error(f"Error in fact extraction: {e}")
@@ -396,7 +432,13 @@ class GravityMemoryProvider(MemoryProvider):
                 elif action == "update":
                     if not target_id or not content:
                         return tool_error("target_id and content required for update.")
-                    self.on_memory_write("replace", "user", content, metadata={"sub_category": category} if category else None, target_id=target_id)
+                    
+                    # Prepare metadata with category and target_id
+                    metadata = {"sub_category": category} if category else {}
+                    if target_id:
+                        metadata["target_id"] = target_id
+                        
+                    self.on_memory_write("replace", "user", content, metadata=metadata)
                     return json.dumps({"success": True, "message": f"Memory {target_id} updated."})
 
                 return tool_error(f"Unknown action: {action}")
