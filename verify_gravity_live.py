@@ -34,7 +34,7 @@ def verify_live():
         print("❌ Error: Las dependencias o credenciales no están completas.")
         print(f"SUPABASE_URL: {'OK' if os.getenv('SUPABASE_URL') else 'MISSING'}")
         print(f"PINECONE_API_KEY: {'OK' if os.getenv('PINECONE_API_KEY') else 'MISSING'}")
-        print(f"GEMINI_API_KEY: {'OK' if os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_API_KEY') else 'MISSING'}")
+        print(f"PINECONE_INDEX_NAME: {'OK' if os.getenv('PINECONE_INDEX_NAME') else 'MISSING'}")
         return
 
     # Simular inicialización

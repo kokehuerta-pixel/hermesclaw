@@ -10,13 +10,23 @@ from agent.auxiliary_client import get_text_auxiliary_client
 
 logger = logging.getLogger(__name__)
 
+# Constants for semantic memory noise filtering
+NOISE_PREFIXES = ("/", "!", ".")
+NOISE_KEYWORDS = [
+    "Cambiado modelo",
+    "Memoria actualizada",
+    "Skin cambiada",
+    "Sesión reanudada",
+    "Limpiando terminal",
+    "Cargando..."
+]
+
 # Deferred imports for optional dependencies
 supabase_client = None
 pinecone_client = None
-genai = None
 
 def _import_deps():
-    global supabase_client, pinecone_client, genai
+    global supabase_client, pinecone_client
     try:
         from supabase import create_client as supabase_create
         supabase_client = supabase_create
@@ -28,12 +38,6 @@ def _import_deps():
         pinecone_client = Pinecone
     except ImportError:
         logger.debug("pinecone-client package not installed")
-
-    try:
-        import google.generativeai as google_genai
-        genai = google_genai
-    except ImportError:
-        logger.debug("google-generativeai package not installed")
 
 class GravityMemoryProvider(MemoryProvider):
     """Memory provider using Supabase (relational) and Pinecone (semantic)."""
@@ -56,13 +60,12 @@ class GravityMemoryProvider(MemoryProvider):
 
     def is_available(self) -> bool:
         """Check if credentials and dependencies are present."""
-        has_deps = all([supabase_client, pinecone_client, genai])
+        has_deps = all([supabase_client, pinecone_client])
         has_creds = all([
             os.getenv("SUPABASE_URL"),
             os.getenv("SUPABASE_SERVICE_ROLE_KEY"),
             os.getenv("PINECONE_API_KEY"),
-            os.getenv("PINECONE_INDEX_NAME"),
-            os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+            os.getenv("PINECONE_INDEX_NAME")
         ])
         return has_deps and has_creds
 
@@ -82,11 +85,8 @@ class GravityMemoryProvider(MemoryProvider):
 
         # Initialize Pinecone
         pc = pinecone_client(api_key=os.getenv("PINECONE_API_KEY"))
+        # Targeted index should be configured for Integrated Inference
         self._pc_index = pc.Index(os.getenv("PINECONE_INDEX_NAME"))
-
-        # Initialize Gemini for embeddings
-        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        genai.configure(api_key=api_key)
 
         self._initialized = True
         logger.info(f"Gravity memory provider initialized for session {session_id}")
@@ -96,49 +96,43 @@ class GravityMemoryProvider(MemoryProvider):
             return ""
 
         try:
-            # 1. Generate embedding
-            model = os.getenv("GEMINI_EMBEDDING_MODEL", "models/gemini-embedding-2-preview")
-            result = genai.embed_content(
-                model=model,
-                content=query,
-                task_type="retrieval_query"
-            )
-            embedding = result['embedding']
-
-            # 2. Search Pinecone
-            # Search in the unified namespace (we'll migrate to 'gravity' for clarity)
-            search_results = self._pc_index.query(
-                vector=embedding,
-                top_k=8,
-                include_metadata=True,
-                namespace="gravity"
+            # Search Pinecone with Integrated Inference
+            search_results = self._pc_index.search(
+                namespace="gravity",
+                query={
+                    "inputs": {"text": query},
+                    "top_k": 8
+                },
+                fields=["text", "category", "sub_category"]
             )
 
-            matches = search_results.get("matches", [])
-            if not matches:
-                # Try fallback to legacy namespace
-                search_results = self._pc_index.query(
-                    vector=embedding,
-                    top_k=5,
-                    include_metadata=True,
-                    namespace="conversations"
+            hits = getattr(search_results.get("result", {}), "hits", [])
+            if not hits:
+                # Try fallback to legacy namespace (this might fail if model mismatch, but safe to try)
+                search_results = self._pc_index.search(
+                    namespace="conversations",
+                    query={
+                        "inputs": {"text": query},
+                        "top_k": 5
+                    },
+                    fields=["text", "category"]
                 )
-                matches = search_results.get("matches", [])
-                if not matches:
+                hits = getattr(search_results.get("result", {}), "hits", [])
+                if not hits:
                     return ""
 
             # 3. Format context
             facts = []
             convs = []
             
-            for m in matches:
-                meta = m.get("metadata", {})
-                text = meta.get("text", "")
-                category = meta.get("category", "conversación") # Default to conversacion for legacy
-                score = m.get("score", 0)
+            for hit in hits:
+                fields = hit.get("fields", {})
+                text = fields.get("text", "")
+                category = fields.get("category", "conversación")
+                score = hit.get("score", 0)
                 
                 if text:
-                    sub_cat = meta.get("sub_category", "general")
+                    sub_cat = fields.get("sub_category", "general")
                     label = f"HECHO:{sub_cat}" if category == "fact" else "CONV"
                     formatted = f"[{label} - {score:.2f}] {text}"
                     if category == "fact":
@@ -178,28 +172,26 @@ class GravityMemoryProvider(MemoryProvider):
                 self._bg_extract_facts(user_content, assistant_content)
 
                 # 3. Embed and Save turn to Pinecone (as Conversation history)
-                turn_text = f"User: {user_content}\nAssistant: {assistant_content}"
-                model = os.getenv("GEMINI_EMBEDDING_MODEL", "models/gemini-embedding-2-preview")
-                res = genai.embed_content(
-                    model=model,
-                    content=turn_text,
-                    task_type="retrieval_document"
-                )
-                embedding = res['embedding']
+                # OPTIMIZATION: Skip noisy/administrative turns for semantic memory
+                is_command = user_content.strip().startswith(NOISE_PREFIXES)
+                is_admin_reply = any(kw in assistant_content for kw in NOISE_KEYWORDS)
+                
+                if is_command or is_admin_reply:
+                    logger.debug(f"Skipping noisy turn for Pinecone: {user_content[:50]}...")
+                    return
 
-                self._pc_index.upsert(
-                    vectors=[{
+                turn_text = f"User: {user_content}\nAssistant: {assistant_content}"
+                
+                self._pc_index.upsert_records(
+                    namespace="gravity",
+                    records=[{
                         "id": f"conv-{self._session_id}-{datetime.now().timestamp()}",
-                        "values": embedding,
-                        "metadata": {
-                            "text": turn_text,
-                            "category": "conversation",
-                            "user_id": self._user_id,
-                            "session_id": self._session_id,
-                            "timestamp": datetime.now().isoformat()
-                        }
-                    }],
-                    namespace="gravity"
+                        "text": turn_text,
+                        "category": "conversation",
+                        "user_id": self._user_id,
+                        "session_id": self._session_id,
+                        "timestamp": datetime.now().isoformat()
+                    }]
                 )
             except Exception as e:
                 logger.error(f"Error in gravity sync_turn: {e}")
@@ -223,27 +215,16 @@ class GravityMemoryProvider(MemoryProvider):
                     }, on_conflict="user_id,key").execute()
 
                     # 2. Mirror to Pinecone for semantic retrieval
-                    model = os.getenv("GEMINI_EMBEDDING_MODEL", "models/gemini-embedding-2-preview")
-                    res = genai.embed_content(
-                        model=model,
-                        content=content,
-                        task_type="retrieval_document"
-                    )
-                    embedding = res['embedding']
-
-                    self._pc_index.upsert(
-                        vectors=[{
+                    self._pc_index.upsert_records(
+                        namespace="gravity",
+                        records=[{
                             "id": f"fact-{self._user_id}-{fact_id}",
-                            "values": embedding,
-                            "metadata": {
-                                "text": content,
-                                "category": "fact",
-                                "sub_category": metadata.get("sub_category", "general") if metadata else "general",
-                                "user_id": self._user_id,
-                                "timestamp": datetime.now().isoformat()
-                            }
-                        }],
-                        namespace="gravity"
+                            "text": content,
+                            "category": "fact",
+                            "sub_category": metadata.get("sub_category", "general") if metadata else "general",
+                            "user_id": self._user_id,
+                            "timestamp": datetime.now().isoformat()
+                        }]
                     )
                     logger.info(f"Fact mirrored to Pinecone: {fact_id}")
 
@@ -391,8 +372,7 @@ class GravityMemoryProvider(MemoryProvider):
             {"key": "SUPABASE_URL", "description": "Supabase Project URL", "secret": True, "required": True},
             {"key": "SUPABASE_SERVICE_ROLE_KEY", "description": "Supabase Service Role Key", "secret": True, "required": True},
             {"key": "PINECONE_API_KEY", "description": "Pinecone API Key", "secret": True, "required": True},
-            {"key": "PINECONE_INDEX_NAME", "description": "Pinecone Index Name", "secret": True, "required": True},
-            {"key": "GEMINI_API_KEY", "description": "Gemini API Key for Embeddings", "secret": True, "required": True}
+            {"key": "PINECONE_INDEX_NAME", "description": "Pinecone Index Name (Integrated)", "secret": True, "required": True}
         ]
 
 def register(ctx):
