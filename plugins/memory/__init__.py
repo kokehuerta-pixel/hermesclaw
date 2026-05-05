@@ -96,7 +96,7 @@ def discover_memory_providers() -> list[tuple[str, str, bool]]:
         for d in bundled_dir.iterdir():
             if d.is_dir() and not d.name.startswith("__"):
                 name, desc = _get_info(d)
-                providers.append((name, desc, True))
+                providers.append((name, desc, False))
                 seen_names.add(name)
 
     # 2. User providers
