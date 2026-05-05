@@ -3,6 +3,7 @@ import importlib
 import importlib.util
 import os
 from typing import TYPE_CHECKING, Any
+from pathlib import Path
 
 if TYPE_CHECKING:
     from agent.memory_provider import MemoryProvider
@@ -18,7 +19,8 @@ class _ProviderCollector:
         self.provider = provider
 
 def load_memory_provider(name: str, config: dict[str, Any] = None) -> "MemoryProvider":
-    """Dynamic loader for memory provider plugins."""
+    """Dynamic loader for memory provider plugins. Supports bundled and user plugins."""
+    mod = None
 
     # 1. Try repo-bundled providers first (plugins.memory.<name>)
     try:
@@ -29,16 +31,15 @@ def load_memory_provider(name: str, config: dict[str, Any] = None) -> "MemoryPro
         plugin_dir = get_hermes_home() / "plugins" / name
         init_file = plugin_dir / "__init__.py"
         
-        if not init_file.exists():
-            logger.error("Memory provider %s not found in bundled or user plugins", name)
-            raise ImportError(f"No memory provider found for '{name}'")
-            
-        spec = importlib.util.spec_from_file_location(f"user_plugins.memory.{name}", str(init_file))
-        if spec and spec.loader:
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-        else:
-            raise ImportError(f"Could not load memory provider from {init_file}")
+        if init_file.exists():
+            spec = importlib.util.spec_from_file_location(f"user_plugins.memory.{name}", str(init_file))
+            if spec and spec.loader:
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+    
+    if not mod:
+        logger.error("Memory provider %s not found in bundled or user plugins", name)
+        raise ImportError(f"No memory provider found for '{name}'")
 
     # Try register(ctx) pattern first (how our plugins are written)
     if hasattr(mod, "register"):
@@ -51,7 +52,10 @@ def load_memory_provider(name: str, config: dict[str, Any] = None) -> "MemoryPro
             logger.debug("register() failed for %s: %s", name, e)
 
     # Fallback: look for a class named <Name>MemoryProvider
-    class_name = f"{name.capitalize()}MemoryProvider"
+    # Handle snake_case to CamelCase conversion for class names
+    camel_name = "".join(word.capitalize() for word in name.split("_"))
+    class_name = f"{camel_name}MemoryProvider"
+    
     if hasattr(mod, class_name):
         provider_cls = getattr(mod, class_name)
         provider = provider_cls()
@@ -62,33 +66,49 @@ def load_memory_provider(name: str, config: dict[str, Any] = None) -> "MemoryPro
 def discover_memory_providers() -> list[tuple[str, str, bool]]:
     """Discover available memory providers in bundled and user plugins."""
     from hermes_constants import get_hermes_home
-    from pathlib import Path
-
+    
     providers = []
     seen_names = set()
 
+    def _get_info(d: Path) -> tuple[str, str]:
+        """Helper to get name and description from plugin.yaml or folder name."""
+        name = d.name
+        desc = f"Memory provider from {d.name}"
+        
+        manifest_file = d / "plugin.yaml"
+        if not manifest_file.exists():
+            manifest_file = d / "plugin.yml"
+            
+        if manifest_file.exists():
+            try:
+                import yaml
+                with open(manifest_file, "r") as f:
+                    manifest = yaml.safe_load(f) or {}
+                    name = manifest.get("name", name)
+                    desc = manifest.get("description", desc)
+            except Exception:
+                pass
+        return name, desc
+
     # 1. Bundled providers
     bundled_dir = Path(__file__).parent
-    for d in bundled_dir.iterdir():
-        if d.is_dir() and not d.name.startswith("__"):
-            name = d.name
-            desc = f"Bundled {name} provider"
-            providers.append((name, desc, True))
-            seen_names.add(name)
+    if bundled_dir.is_dir():
+        for d in bundled_dir.iterdir():
+            if d.is_dir() and not d.name.startswith("__"):
+                name, desc = _get_info(d)
+                providers.append((name, desc, True))
+                seen_names.add(name)
 
     # 2. User providers
     user_plugins_dir = get_hermes_home() / "plugins"
     if user_plugins_dir.is_dir():
         for d in user_plugins_dir.iterdir():
             if d.is_dir() and not d.name.startswith("__"):
-                name = d.name
-                if name in seen_names:
-                    continue
-                
-                # Check if it looks like a memory provider (has __init__.py and maybe a specific class)
+                # We check for __init__.py to ensure it's a loadable plugin
                 if (d / "__init__.py").exists():
-                    desc = f"User {name} provider"
-                    providers.append((name, desc, True))
-                    seen_names.add(name)
+                    name, desc = _get_info(d)
+                    if name not in seen_names:
+                        providers.append((name, desc, True))
+                        seen_names.add(name)
 
     return providers
