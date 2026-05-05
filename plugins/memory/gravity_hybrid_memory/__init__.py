@@ -102,19 +102,34 @@ class GravityHybridMemoryProvider(MemoryProvider):
         ).start()
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        return [{
-            "name": "gravity_manage_fact",
-            "description": "Manage Tier 1 permanent facts in Gravity Memory.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "action": {"type": "string", "enum": ["add", "delete", "list"]},
-                    "key": {"type": "string", "description": "The unique name of the fact."},
-                    "value": {"type": "string", "description": "The content of the fact (for add)."}
-                },
-                "required": ["action"]
+        return [
+            {
+                "name": "gravity_manage_fact",
+                "description": "Manage Tier 1 permanent facts in Gravity Memory.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["add", "delete", "list"]},
+                        "key": {"type": "string", "description": "The unique name of the fact."},
+                        "value": {"type": "string", "description": "The content of the fact (for add)."}
+                    },
+                    "required": ["action"]
+                }
+            },
+            {
+                "name": "gravity_configure_router",
+                "description": "Configure the strategic model router for specific tasks (coding, reflection, etc.).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["update", "list"]},
+                        "task": {"type": "string", "description": "The task name (e.g., 'coding', 'reflection')."},
+                        "model": {"type": "string", "description": "The model name to assign."}
+                    },
+                    "required": ["action"]
+                }
             }
-        }]
+        ]
 
     def get_config_schema(self) -> List[Dict[str, Any]]:
         return [
@@ -135,6 +150,19 @@ class GravityHybridMemoryProvider(MemoryProvider):
             elif action == "list":
                 facts = self.t1.recall_facts()
                 return json.dumps({"success": True, "facts": facts})
+        elif tool_name == "gravity_configure_router":
+            from agent.auxiliary_client import get_gemini_strategic_models, update_gemini_strategic_model
+            action = args.get("action")
+            if action == "list":
+                return json.dumps({"success": True, "models": get_gemini_strategic_models()})
+            elif action == "update":
+                task = args.get("task")
+                model = args.get("model")
+                if task and model:
+                    if update_gemini_strategic_model(task, model):
+                        return json.dumps({"success": True, "message": f"Updated {task} model to {model}"})
+                    else:
+                        return json.dumps({"success": False, "error": f"Unknown task: {task}"})
         return json.dumps({"success": False, "error": "Unknown tool or missing args"})
 
     def shutdown(self) -> None:
