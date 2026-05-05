@@ -58,3 +58,37 @@ def load_memory_provider(name: str, config: dict[str, Any] = None) -> "MemoryPro
         return provider
 
     raise ValueError(f"No valid memory provider found in plugins.memory.{name}")
+
+def discover_memory_providers() -> list[tuple[str, str, bool]]:
+    """Discover available memory providers in bundled and user plugins."""
+    from hermes_constants import get_hermes_home
+    from pathlib import Path
+
+    providers = []
+    seen_names = set()
+
+    # 1. Bundled providers
+    bundled_dir = Path(__file__).parent
+    for d in bundled_dir.iterdir():
+        if d.is_dir() and not d.name.startswith("__"):
+            name = d.name
+            desc = f"Bundled {name} provider"
+            providers.append((name, desc, True))
+            seen_names.add(name)
+
+    # 2. User providers
+    user_plugins_dir = get_hermes_home() / "plugins"
+    if user_plugins_dir.is_dir():
+        for d in user_plugins_dir.iterdir():
+            if d.is_dir() and not d.name.startswith("__"):
+                name = d.name
+                if name in seen_names:
+                    continue
+                
+                # Check if it looks like a memory provider (has __init__.py and maybe a specific class)
+                if (d / "__init__.py").exists():
+                    desc = f"User {name} provider"
+                    providers.append((name, desc, True))
+                    seen_names.add(name)
+
+    return providers
