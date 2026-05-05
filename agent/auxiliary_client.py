@@ -227,10 +227,10 @@ _API_KEY_PROVIDER_AUX_MODELS: Dict[str, str] = {
     "minimax-oauth": "MiniMax-M2.7-highspeed",
     "minimax-cn": "MiniMax-M2.7",
     "anthropic": "claude-haiku-4-5-20251001",
-    "ai-gateway": "google/gemini-3-flash",
-    "opencode-zen": "gemini-3-flash",
+    "ai-gateway": "google/gemini-3.1-flash-lite-preview",
+    "opencode-zen": "gemini-3.1-flash-lite-preview",
     "opencode-go": "glm-5",
-    "kilocode": "google/gemini-3-flash-preview",
+    "kilocode": "google/gemini-3.1-flash-lite-preview",
     "ollama-cloud": "nemotron-3-nano:30b",
     "tencent-tokenhub": "hy3-preview",
 }
@@ -238,14 +238,14 @@ _API_KEY_PROVIDER_AUX_MODELS: Dict[str, str] = {
 # Strategic routing for Gemini/Gemma models based on task complexity.
 # Used when provider is 'gemini' or 'google' and model is 'auto'.
 _GEMINI_STRATEGIC_MODELS: Dict[str, str] = {
-    "fact_extractor": "gemma-3-12b-it",
+    "fact_extractor": "google/gemini-3.1-flash-lite-preview",
     "reflection": "gemma-3-12b-it",
     "tier2_summary": "gemma-3-12b-it",
     "summarizer": "gemma-3-12b-it",
-    "coding": "gemma-3-27b-it",
+    "coding": "gemma-4-31b-it",
     "vision": "gemma-4-26b-a4b-it",
-    "plan_generation": "gemma-3-27b-it",
-    "validation": "gemma-3-12b-it",
+    "plan_generation": "gemma-4-31b-it",
+    "validation": "gemma-3-27b-it",
     "intent_classification": "gemma-3-12b-it",
 }
 _GEMINI_STRATEGIC_DEFAULT = "gemma-3-27b-it"

@@ -456,9 +456,7 @@ _GOOGLE_HIDDEN_MODELS = frozenset({
     "gemma-3-4b",
     "gemma-3-4b-it",
     "gemma-3-12b",
-    "gemma-3-12b-it",
     "gemma-3-27b",
-    "gemma-3-27b-it",
     # Stale/retired Google slugs that still surface through models.dev-backed
     # Gemini selection but 404 on the current Google endpoints.
     "gemini-1.5-flash",

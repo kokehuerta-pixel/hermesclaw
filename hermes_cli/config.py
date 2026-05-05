@@ -2371,6 +2371,34 @@ OPTIONAL_ENV_VARS = {
         "password": False,
         "category": "setting",
     },
+    "SUPABASE_URL": {
+        "description": "Supabase Project URL for gravity hybrid memory",
+        "prompt": "Supabase Project URL",
+        "url": "https://app.supabase.com/",
+        "password": False,
+        "category": "tool",
+    },
+    "SUPABASE_SERVICE_ROLE_KEY": {
+        "description": "Supabase Service Role Key for gravity hybrid memory (bypass RLS)",
+        "prompt": "Supabase Service Role Key",
+        "url": "https://app.supabase.com/",
+        "password": True,
+        "category": "tool",
+    },
+    "PINECONE_API_KEY": {
+        "description": "Pinecone API Key for gravity hybrid memory (Tier 3 search)",
+        "prompt": "Pinecone API Key",
+        "url": "https://app.pinecone.io/",
+        "password": True,
+        "category": "tool",
+    },
+    "PINECONE_INDEX_NAME": {
+        "description": "Pinecone Index Name for gravity hybrid memory",
+        "prompt": "Pinecone Index Name",
+        "url": "https://app.pinecone.io/",
+        "password": False,
+        "category": "tool",
+    },
 }
 
 # Tool Gateway env vars are always visible — they're useful for
