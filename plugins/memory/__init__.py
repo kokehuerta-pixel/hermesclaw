@@ -1,5 +1,6 @@
 import logging
 import importlib
+import importlib.util
 import os
 from typing import TYPE_CHECKING, Any
 
@@ -19,15 +20,25 @@ class _ProviderCollector:
 def load_memory_provider(name: str, config: dict[str, Any] = None) -> "MemoryProvider":
     """Dynamic loader for memory provider plugins.
 
-    Resolution order:
-      1. plugins.memory.<name>
-      2. ~/.hermes/plugins/<name> (TODO)
-    """
+    # 1. Try repo-bundled providers first (plugins.memory.<name>)
     try:
         mod = importlib.import_module(f"plugins.memory.{name}")
-    except ImportError as e:
-        logger.error("Failed to import memory provider %s: %s", name, e)
-        raise
+    except ImportError:
+        # 2. Try user-installed plugins (~/.hermes/plugins/<name>/)
+        from hermes_constants import get_hermes_home
+        plugin_dir = get_hermes_home() / "plugins" / name
+        init_file = plugin_dir / "__init__.py"
+        
+        if not init_file.exists():
+            logger.error("Memory provider %s not found in bundled or user plugins", name)
+            raise ImportError(f"No memory provider found for '{name}'")
+            
+        spec = importlib.util.spec_from_file_location(f"user_plugins.memory.{name}", str(init_file))
+        if spec and spec.loader:
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+        else:
+            raise ImportError(f"Could not load memory provider from {init_file}")
 
     # Try register(ctx) pattern first (how our plugins are written)
     if hasattr(mod, "register"):
