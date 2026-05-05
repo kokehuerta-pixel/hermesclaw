@@ -217,12 +217,12 @@ def _fixed_temperature_for_model(
 
 # Default auxiliary models for direct API-key providers (cheap/fast for side tasks)
 _API_KEY_PROVIDER_AUX_MODELS: Dict[str, str] = {
-    "gemini": "gemini-3.1-flash-lite-preview",
+    "gemini": "gemma-3-12b-it",
     "zai": "glm-4.5-flash",
     "kimi-coding": "kimi-k2-turbo-preview",
     "stepfun": "step-3.5-flash",
     "kimi-coding-cn": "kimi-k2-turbo-preview",
-    "gmi": "google/gemini-3.1-flash-lite-preview",
+    "gmi": "gemma-3-12b-it",
     "minimax": "MiniMax-M2.7",
     "minimax-oauth": "MiniMax-M2.7-highspeed",
     "minimax-cn": "MiniMax-M2.7",
