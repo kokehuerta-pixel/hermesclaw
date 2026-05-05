@@ -18,7 +18,7 @@ class _ProviderCollector:
         self.provider = provider
 
 def load_memory_provider(name: str, config: dict[str, Any] = None) -> "MemoryProvider":
-    """Dynamic loader for memory provider plugins.
+    """Dynamic loader for memory provider plugins."""
 
     # 1. Try repo-bundled providers first (plugins.memory.<name>)
     try:
