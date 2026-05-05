@@ -248,7 +248,7 @@ _GEMINI_STRATEGIC_MODELS: Dict[str, str] = {
     "validation": "gemma-3-27b-it",
     "intent_classification": "gemma-3-12b-it",
 }
-_GEMINI_STRATEGIC_DEFAULT = "gemma-3-27b-it"
+_GEMINI_STRATEGIC_DEFAULT = "gemma-4-31b-it"
 
 def get_gemini_strategic_models() -> Dict[str, str]:
     """Return the current strategic model mapping."""
