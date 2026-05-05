@@ -80,28 +80,33 @@ MANAGE_MEMORY_SCHEMA = {
     "name": "gravity_manage_memory",
     "description": (
         "Manage the long-term autonomous memory (Gravity). "
-        "Use this to add, search, update, or delete permanent facts about the user or project."
+        "Use this to add, search, update, delete, or list permanent facts about the user, projects, or technical preferences."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["add", "search", "update", "delete"],
+                "enum": ["add", "search", "update", "delete", "list"],
                 "description": "The action to perform."
             },
             "target_id": {
                 "type": "string",
-                "description": "The ID of the memory to update or delete (returned from search)."
+                "description": "The key or ID of the memory (e.g., 'user_name', 'project_stack'). Required for update/delete."
             },
             "content": {
                 "type": "string",
-                "description": "The memory text to add, update, or search for."
+                "description": "The memory text to add, update, or the query for search."
             },
             "category": {
                 "type": "string",
-                "enum": ["user_preference", "project_context", "technical_stack", "personal_info", "workflow_pattern"],
-                "description": "The category of the memory (optional, defaults to 'general')."
+                "enum": ["user_preference", "project_context", "technical_stack", "personal_info", "workflow_pattern", "general"],
+                "description": "The category of the memory (optional)."
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Max results for list/search (optional, default 10).",
+                "default": 10
             }
         },
         "required": ["action"]
@@ -180,16 +185,36 @@ class GravityMemoryProvider(MemoryProvider):
     def system_prompt_block(self) -> str:
         if not self._initialized:
             return ""
+        
+        # Quick check for core facts count to show status
+        try:
+            res = self._supabase.table("core_memory").select("id", count="exact").eq("user_id", self._user_id).execute()
+            count = res.count if hasattr(res, "count") else 0
+        except:
+            count = "?"
+
         return (
-            "# Gravity Memory\n"
-            f"Active. User: {self._user_id}.\n"
-            "Use gravity_manage_memory to add, search, update, or delete permanent facts."
+            "# Gravity Memory (Nativo)\n"
+            f"Estado: Activo. Usuario: {self._user_id}. Hechos guardados: {count}.\n"
+            "Este sistema captura automáticamente hechos importantes. Puedes gestionarlos con 'gravity_manage_memory'.\n"
+            "Los hechos recuperados semánticamente se inyectarán automáticamente cuando sean relevantes."
         )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
-        """Return the pre-fetched semantic context."""
+        """Return the pre-fetched semantic context or run a direct search."""
+        if not self._initialized:
+            return ""
+
+        # 1. If we have a query, try to get fresh results if background one is empty or irrelevant
+        if query:
+            # For now, if we have a query but no background result, we just use the background mechanism logic
+            # but synchronously if needed (though the interface expects fast return).
+            # We'll stick to the background result for the system prompt injection,
+            # but allow direct tool calls to use a separate path.
+            pass
+
         if self._prefetch_thread and self._prefetch_thread.is_alive():
-            self._prefetch_thread.join(timeout=3.0)
+            self._prefetch_thread.join(timeout=2.0)
         
         with self._prefetch_lock:
             result = self._prefetch_result
@@ -321,15 +346,17 @@ class GravityMemoryProvider(MemoryProvider):
                     if not target_id:
                         # Fallback: hash the content if no ID provided
                         target_id = ("fact_" + str(hash(content))[:8])
-                    # 1. Save to Supabase
+                    # 1. Save to Supabase (Source of Truth)
                     self._supabase.table("core_memory").upsert({
                         "user_id": self._user_id,
                         "key": target_id,
                         "value": content,
+                        "category": metadata.get("sub_category", "general") if metadata else "general",
+                        "metadata": metadata or {},
                         "updated_at": datetime.now().isoformat()
                     }, on_conflict="user_id,key").execute()
 
-                    # 2. Mirror to Pinecone
+                    # 2. Mirror to Pinecone (Semantic Index)
                     self._pc_index.upsert_records(
                         namespace="gravity",
                         records=[{
@@ -419,27 +446,38 @@ class GravityMemoryProvider(MemoryProvider):
                     return json.dumps({"success": True, "message": "Fact added to long-term memory."})
                 
                 elif action == "search":
-                    results = self.prefetch(content)
-                    return json.dumps({"success": True, "results": results})
+                    if not content:
+                        return tool_error("content (query) required for search.")
+                    # Direct Pinecone search for immediate tool result
+                    search_results = self._pc_index.search(
+                        namespace="gravity",
+                        inputs={"text": content},
+                        top_k=args.get("limit", 10),
+                        fields=["text", "category", "sub_category"]
+                    )
+                    hits = getattr(search_results.result, "hits", []) if hasattr(search_results, "result") else []
+                    return json.dumps({"success": True, "hits": [
+                        {"text": h.fields.get("text"), "score": h.score, "id": h.id} for h in hits
+                    ]})
+
+                elif action == "list":
+                    limit = args.get("limit", 10)
+                    res = self._supabase.table("core_memory").select("*").eq("user_id", self._user_id).limit(limit).order("updated_at", ascending=False).execute()
+                    return json.dumps({"success": True, "memories": res.data})
 
                 elif action == "delete":
                     if not target_id:
-                        return tool_error("target_id required for delete.")
-                    self._supabase.table("core_memory").delete().eq("key", target_id).execute()
+                        return tool_error("target_id (key) required for delete.")
+                    self._supabase.table("core_memory").delete().eq("user_id", self._user_id).eq("key", target_id).execute()
                     self._pc_index.delete(ids=[f"fact-{self._user_id}-{target_id}"], namespace="gravity")
-                    return json.dumps({"success": True, "message": f"Memory {target_id} deleted."})
+                    return json.dumps({"success": True, "message": f"Memory '{target_id}' deleted."})
 
                 elif action == "update":
                     if not target_id or not content:
                         return tool_error("target_id and content required for update.")
                     
-                    # Prepare metadata with category and target_id
-                    metadata = {"sub_category": category} if category else {}
-                    if target_id:
-                        metadata["target_id"] = target_id
-                        
-                    self.on_memory_write("replace", "user", content, metadata=metadata)
-                    return json.dumps({"success": True, "message": f"Memory {target_id} updated."})
+                    self.on_memory_write("replace", "user", content, metadata={"sub_category": category, "target_id": target_id} if category else {"target_id": target_id})
+                    return json.dumps({"success": True, "message": f"Memory '{target_id}' updated."})
 
                 return tool_error(f"Unknown action: {action}")
             except Exception as e:

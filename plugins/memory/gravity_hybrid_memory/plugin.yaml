@@ -1,0 +1,6 @@
+name: gravity_hybrid_memory
+description: "4-Tier Hybrid Memory (Supabase + Pinecone) with Reflection Engine."
+version: "2.0.0"
+author: "Gravity Team"
+enabled: true
+toolset: gravity_hybrid

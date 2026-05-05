@@ -35,9 +35,6 @@ def load_memory_provider(name: str, config: dict[str, Any] = None) -> "MemoryPro
         try:
             mod.register(collector)
             if collector.provider:
-                # Initialize if not already done, or if config changed
-                if hasattr(collector.provider, "initialize"):
-                    collector.provider.initialize(config or {})
                 return collector.provider
         except Exception as e:
             logger.debug("register() failed for %s: %s", name, e)
@@ -47,8 +44,6 @@ def load_memory_provider(name: str, config: dict[str, Any] = None) -> "MemoryPro
     if hasattr(mod, class_name):
         provider_cls = getattr(mod, class_name)
         provider = provider_cls()
-        if hasattr(provider, "initialize"):
-            provider.initialize(config or {})
         return provider
 
     raise ValueError(f"No valid memory provider found in plugins.memory.{name}")
