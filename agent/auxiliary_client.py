@@ -217,7 +217,7 @@ def _fixed_temperature_for_model(
 
 # Default auxiliary models for direct API-key providers (cheap/fast for side tasks)
 _API_KEY_PROVIDER_AUX_MODELS: Dict[str, str] = {
-    "gemini": "gemini-3-flash-preview",
+    "gemini": "gemini-3.1-flash-lite-preview",
     "zai": "glm-4.5-flash",
     "kimi-coding": "kimi-k2-turbo-preview",
     "stepfun": "step-3.5-flash",
@@ -234,6 +234,33 @@ _API_KEY_PROVIDER_AUX_MODELS: Dict[str, str] = {
     "ollama-cloud": "nemotron-3-nano:30b",
     "tencent-tokenhub": "hy3-preview",
 }
+
+# Strategic routing for Gemini/Gemma models based on task complexity.
+# Used when provider is 'gemini' or 'google' and model is 'auto'.
+_GEMINI_STRATEGIC_MODELS: Dict[str, str] = {
+    "fact_extractor": "gemma-3-12b-it",
+    "reflection": "gemma-3-12b-it",
+    "tier2_summary": "gemma-3-12b-it",
+    "summarizer": "gemma-3-12b-it",
+    "coding": "gemma-3-27b-it",
+    "vision": "gemma-4-26b-a4b-it",
+    "plan_generation": "gemma-3-27b-it",
+    "validation": "gemma-3-12b-it",
+    "intent_classification": "gemma-3-12b-it",
+}
+_GEMINI_STRATEGIC_DEFAULT = "gemma-3-27b-it"
+
+def get_gemini_strategic_models() -> Dict[str, str]:
+    """Return the current strategic model mapping."""
+    return dict(_GEMINI_STRATEGIC_MODELS)
+
+def update_gemini_strategic_model(task: str, model: str) -> bool:
+    """Update a specific task's model mapping. Returns True if task existed."""
+    if task in _GEMINI_STRATEGIC_MODELS:
+        _GEMINI_STRATEGIC_MODELS[task] = model
+        return True
+    return False
+
 
 # Vision-specific model overrides for direct providers.
 # When the user's main provider has a dedicated vision/multimodal model that
@@ -3131,6 +3158,15 @@ def _resolve_task_provider_model(
             return "custom", resolved_model, cfg_base_url, cfg_api_key, resolved_api_mode
         if cfg_provider and cfg_provider != "auto":
             return cfg_provider, resolved_model, None, None, resolved_api_mode
+
+        # Gemini Strategic Routing
+        main_prov = (_read_main_provider() or "").strip().lower()
+        if main_prov in ("google", "gemini"):
+            # If the user is on Google/Gemini, use the strategic model for this task.
+            if not resolved_model or resolved_model == "auto":
+                strat_model = _GEMINI_STRATEGIC_MODELS.get(task, _GEMINI_STRATEGIC_DEFAULT)
+                logger.debug("Gemini Strategic Router: resolved task %r to model %r", task, strat_model)
+                return "gemini", strat_model, None, None, resolved_api_mode
 
         return "auto", resolved_model, None, None, resolved_api_mode
 
